@@ -1,0 +1,47 @@
+{
+  "name": "cache-keepalive",
+  "version": "0.2.0",
+  "description": "Keeps an idle Claude Code session's one-hour prompt cache warm, so coming back reads the conversation instead of paying to write it again.",
+  "author": {
+    "name": "devilcoolyue"
+  },
+  "license": "Apache-2.0",
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enabled",
+      "description": "Keep the prompt cache of idle sessions warm. /keepalive off stops it for one session.",
+      "default": true
+    },
+    "maxHours": {
+      "type": "number",
+      "title": "Longest keepalive (hours)",
+      "description": "How long after the last real turn the cache is kept, 1 to 24.",
+      "default": 3
+    },
+    "minTokens": {
+      "type": "number",
+      "title": "Smallest prompt worth keeping (tokens)",
+      "description": "A conversation below this size is cheap to cache again, so it is left alone.",
+      "default": 100000
+    },
+    "intervalMinutes": {
+      "type": "number",
+      "title": "Minutes between reads",
+      "description": "How long to wait between two reads, 30 to 55. It must land well inside the cache's hour.",
+      "default": 50
+    },
+    "hourCacheOnApiKey": {
+      "type": "boolean",
+      "title": "My API key or relay writes one-hour caches",
+      "description": "Claude Code writes five-minute caches on API keys and relays, which a keepalive cannot pay for. Turn this on only if you configured one-hour caches there.",
+      "default": false
+    },
+    "pausePercent": {
+      "type": "number",
+      "title": "Pause at five-hour usage (%)",
+      "description": "At this share of the five-hour window, stop new work so the rest stays for keepalive reads; it carries on after the reset. 50 to 99, or 0 never to pause.",
+      "default": 95
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "claude-cache-keepalive",
+  "owner": {
+    "name": "devilcoolyue"
+  },
+  "metadata": {
+    "description": "Keeps an idle Claude Code session's prompt cache alive."
+  },
+  "plugins": [
+    {
+      "name": "cache-keepalive",
+      "source": "./",
+      "description": "Keeps an idle Claude Code session's one-hour prompt cache warm, so coming back reads the conversation instead of paying to write it again."
+    }
+  ]
+}
