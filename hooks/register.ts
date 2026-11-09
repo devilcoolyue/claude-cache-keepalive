@@ -1,4 +1,7 @@
+import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, PluginOptions, Register, SessionRateLimit } from 'claude-code'
+
+const statusLine = atom({ plugin: 'cache-keepalive', key: 'statusLine' } as const, '')
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -37,6 +40,7 @@ type Settings = {
   hourCacheOnApiKey: boolean
   /** The five-hour usage that pauses the session; 0 never pauses. */
   pausePercent: number
+  showStatus: boolean
 }
 
 type Plan = {
@@ -67,6 +71,10 @@ type Runtime = {
   turnId?: string
   isOff: boolean
   lastEnd: string
+  /** Why nothing is planned, in the few words the status line has room for. */
+  lastLabel: string
+  /** What the status line was last told, to redraw only on a change. */
+  lastStatus?: string
   /** Messages typed during a pause, sent once it ends. */
   held: string[]
   /** A turn the pause stopped, carried on once it ends. */
@@ -95,6 +103,7 @@ function settings(options: PluginOptions): Settings {
     interval: clamp(options.intervalMinutes, 30, 55, 50) * MINUTE,
     hourCacheOnApiKey: options.hourCacheOnApiKey === true,
     pausePercent: pause <= 0 ? 0 : clamp(pause, 50, 99, 95),
+    showStatus: options.showStatus !== false,
   }
 }
 
@@ -104,6 +113,13 @@ function formatTokens(n: number) {
 
 function minutesUntil(at: number, now: number) {
   return Math.max(Math.ceil((at - now) / MINUTE), 0)
+}
+
+function formatWait(at: number, now: number) {
+  const minutes = minutesUntil(at, now)
+  if (minutes < 60) return `${minutes}m`
+  const rest = minutes % 60
+  return rest ? `${Math.floor(minutes / 60)}h ${rest}m` : `${minutes / 60}h`
 }
 
 /** The window's reset, or undefined when it reported none it can be held to. */
@@ -137,16 +153,48 @@ function disarm(s: Runtime) {
   s.cancelTimer = undefined
 }
 
-function end(s: Runtime, why: string) {
+function end(s: Runtime, why: string, label = 'stopped') {
   disarm(s)
   s.plan = undefined
   s.lastEnd = why
+  s.lastLabel = label
+}
+
+/** The few words shown under the prompt; empty when there is nothing to show. */
+function statusText(s: Runtime, now: number, pause: Pause | undefined) {
+  if (s.isOff) return ''
+  if (pause) {
+    const held = s.held.length ? `, ${s.held.length} held` : ''
+    return `keepalive paused at ${pause.percent}%, resets in ${formatWait(pause.resetsAt, now)}${held}`
+  }
+  if (s.turnId !== undefined) return 'keepalive on'
+  if (s.plan) {
+    const { reads } = s.plan
+    const count = reads ? ` (${reads} read${reads > 1 ? 's' : ''})` : ''
+    return `keepalive next read in ${formatWait(s.plan.next, now)}${count}`
+  }
+  return `keepalive ${s.lastLabel || 'starts after the next turn'}`
+}
+
+/** Tells the status line the current state. Never fails the hook that asks. */
+async function refreshStatus($: Engine, s: Runtime) {
+  try {
+    if (!s.config.showStatus) return
+    const text = statusText(s, await $.clock.now(), await currentPause($, s))
+    if (text === s.lastStatus) return
+    s.lastStatus = text
+    await update($, statusLine, () => text)
+  } catch {
+    s.lastStatus = undefined
+  }
 }
 
 function arm($: Engine, s: Runtime, plan: Plan, now: number) {
   disarm(s)
   const timer = $.clock.after(Math.max(plan.next - now, 1000), () => {
-    fire($, s).catch(err => end(s, `failed: ${String(err)}`))
+    fire($, s)
+      .catch(err => end(s, `failed: ${String(err)}`))
+      .finally(() => refreshStatus($, s))
   })
   s.cancelTimer = () => timer.cancel()
 }
@@ -160,9 +208,11 @@ function armResume($: Engine, s: Runtime, delay: number) {
   disarmResume(s)
   const timer = $.clock.after(delay, () => {
     s.cancelResume = undefined
-    resume($, s).catch(err => {
-      s.lastEnd = `could not resume: ${String(err)}`
-    })
+    resume($, s)
+      .catch(err => {
+        s.lastEnd = `could not resume: ${String(err)}`
+      })
+      .finally(() => refreshStatus($, s))
   })
   s.cancelResume = () => timer.cancel()
 }
@@ -213,12 +263,13 @@ async function replan($: Engine, s: Runtime) {
   const { config } = s
   const now = await $.clock.now()
   if (!(await hasHourCache($, s))) {
-    end(s, 'not kept: this account writes five-minute caches')
+    end(s, 'not kept: this account writes five-minute caches', 'skipped: 5-minute cache')
     return
   }
   const tokens = (await $.session.usage()).context.tokens ?? 0
   if (tokens < config.minTokens) {
-    end(s, `not kept: the prompt has ${formatTokens(tokens)} tokens, below ${formatTokens(config.minTokens)}`)
+    end(s, `not kept: the prompt has ${formatTokens(tokens)} tokens, below ${formatTokens(config.minTokens)}`,
+      `skipped: ${formatTokens(tokens)} is below ${formatTokens(config.minTokens)}`)
     return
   }
   const model = await $.session.model()
@@ -317,7 +368,7 @@ async function describe($: Engine, s: Runtime) {
   if (plan) {
     lines.push(`Cache keepalive: ${formatTokens(plan.tokens)} tokens, next read in ${minutesUntil(plan.next, now)} min, ${plan.reads} read(s) so far, kept for ${minutesUntil(plan.until, now)} more min.`)
   } else {
-    lines.push(`Cache keepalive is on, nothing planned.${s.lastEnd ? ` Last: ${s.lastEnd}.` : ''}`)
+    lines.push(`Cache keepalive is on, nothing planned.${s.lastEnd ? ` Last: ${s.lastEnd}.` : ' It starts when the next turn ends.'}`)
   }
   if (pause) {
     const held = s.held.length ? ` ${s.held.length} message(s) held.` : ''
@@ -346,20 +397,62 @@ async function overridePause($: Engine, s: Runtime) {
   return 'Carrying on in this five-hour window; no more pauses until it resets.'
 }
 
+async function runCommand($: Engine, s: Runtime, args: string) {
+  switch (args.trim().toLowerCase()) {
+    case '':
+    case 'status':
+      return describe($, s)
+    case 'off':
+      s.isOff = true
+      end(s, 'turned off')
+      armResume($, s, RESUME_NOW)
+      return 'Cache keepalive is off for this session.'
+    case 'on':
+      s.isOff = false
+      s.lastEnd = ''
+      s.lastLabel = ''
+      if (s.turnId === undefined && (await $.session.turns()) > 0) await replan($, s)
+      return describe($, s)
+    case 'now':
+      return readNow($, s)
+    case 'resume':
+      return overridePause($, s)
+    default:
+      return 'Usage: /keepalive [status|on|off|now|resume]'
+  }
+}
+
 export const register: Register = (on, options) => {
   const config = settings(options)
-  const s: Runtime = { config, isOff: !config.enabled, lastEnd: '', held: [], isTurnStopped: false }
+  const s: Runtime = { config, isOff: !config.enabled, lastEnd: '', lastLabel: '', held: [], isTurnStopped: false }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'keepalive',
       description: 'Shows or changes the prompt cache keepalive: status, on, off, now, resume',
     })
+    if (e.isInteractive && config.showStatus) {
+      // The minutes it counts down, and usage that moved without a turn.
+      $.clock.every(MINUTE, () => {
+        void refreshStatus($, s)
+      })
+      await refreshStatus($, s)
+    }
     return next(e)
   })
 
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const text = config.showStatus ? await read($, statusLine) : ''
+    if (!text) return next(e)
+    const tail = e.props.tail ? `${e.props.tail} · ${text}` : text
+    return next({ ...e, props: { ...e.props, tail } })
+  })
+
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined) s.turnId = e.turnId
+    if (e.agentId === undefined) {
+      s.turnId = e.turnId
+      await refreshStatus($, s)
+    }
     return next(e)
   })
 
@@ -372,6 +465,7 @@ export const register: Register = (on, options) => {
       if (pause) {
         s.isTurnStopped = true
         resumeAfterReset($, s, pause, await $.clock.now())
+        await refreshStatus($, s)
         await $.turn.abort({ turnId })
         return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
       }
@@ -389,6 +483,7 @@ export const register: Register = (on, options) => {
       await replan($, s)
     }
     // No usage: the turn sent no request, so the cache's hour and the plan stand.
+    await refreshStatus($, s)
     return result
   })
 
@@ -407,37 +502,23 @@ export const register: Register = (on, options) => {
     $.clock.after(CLEAR_DRAFT_DELAY, () => {
       clearHeldDraft($, text).catch(() => undefined)
     })
+    await refreshStatus($, s)
     return { drop: `${pauseLine(pause, now)} Your message is held and goes out by itself then; /keepalive resume sends it now.` }
   })
 
   // A compaction replaces what the cache held; the next turn writes it anew.
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined) end(s, 'stopped: the conversation was compacted')
+    if (e.agentId === undefined) {
+      end(s, 'stopped: the conversation was compacted')
+      await refreshStatus($, s)
+    }
     return result
   }).catch(($, e, next) => next(e))
 
   on('command.run', { command: 'keepalive' }, async ($, e) => {
-    switch (e.args.trim().toLowerCase()) {
-      case '':
-      case 'status':
-        return { text: await describe($, s) }
-      case 'off':
-        s.isOff = true
-        end(s, 'turned off')
-        armResume($, s, RESUME_NOW)
-        return { text: 'Cache keepalive is off for this session.' }
-      case 'on':
-        s.isOff = false
-        s.lastEnd = ''
-        if (s.turnId === undefined && (await $.session.turns()) > 0) await replan($, s)
-        return { text: await describe($, s) }
-      case 'now':
-        return { text: await readNow($, s) }
-      case 'resume':
-        return { text: await overridePause($, s) }
-      default:
-        return { text: 'Usage: /keepalive [status|on|off|now|resume]' }
-    }
+    const text = await runCommand($, s, e.args)
+    await refreshStatus($, s)
+    return { text }
   })
 }

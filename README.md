@@ -28,9 +28,24 @@ In the desktop app: click + next to the prompt box, then Plugins, Add marketplac
 
 Tested on Claude Code 2.1.319.
 
+## Status
+
+It works on its own once installed. The hint line under the prompt shows what it is doing, and it needs no setup, so it sits happily below a status line such as claude-hud:
+
+| Shown | Meaning |
+| --- | --- |
+| `keepalive next read in 42m (2 reads)` | Keeping the cache warm |
+| `keepalive on` | A turn is running; the next read is planned when it ends |
+| `keepalive paused at 96%, resets in 50m, 1 held` | A five-hour pause, and the messages waiting for the reset |
+| `keepalive starts after the next turn` | Nothing yet: a plan is made when a turn ends |
+| `keepalive skipped: 60K is below 100K` | Not kept. The other skip is `5-minute cache` |
+| `keepalive stopped` | It ended; `/keepalive` says why |
+
+The countdown refreshes once a minute. It shows in the terminal only, and `showStatus: false` hides it.
+
 ## Commands
 
-It works on its own once installed. There is one command, `/keepalive`:
+There is one command, `/keepalive`:
 
 | Command | What it does |
 | --- | --- |
@@ -79,6 +94,7 @@ The window is read from the responses this session receives, so usage elsewhere 
 | `pausePercent` | `95` | Five-hour usage that pauses the session (50–99, or 0 never to pause) |
 | `maxHours` | `3` | How long after the last turn to keep the cache (1–24) |
 | `enabled` | `true` | Keep caches at all |
+| `showStatus` | `true` | Show the state in the hint line under the prompt |
 | `hourCacheOnApiKey` | `false` | Turn on only if your API key or relay is set up to write one-hour caches |
 
 Change them inside Claude Code:

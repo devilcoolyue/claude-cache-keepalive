@@ -37,6 +37,12 @@ function engine(on: On, world: { tokens?: number; rateLimits?: unknown[]; replie
     aborted.push(e.turnId)
     return { value: undefined } as never
   })
+  const shown: { tail?: string } = {}
+  on('ui.render', ($$, e: any) => {
+    shown.tail = e.props.tail
+    const { Text } = $$.ui.resolve(e)
+    return h(Text, {}, 'engine') as never
+  })
   on('prompt.read', () => ({ value: { text: box.text, cursor: 0 } }) as never)
   on('prompt.fill', () => {
     box.text = ''
@@ -60,13 +66,21 @@ function engine(on: On, world: { tokens?: number; rateLimits?: unknown[]; replie
     forks.push(e.prompt)
     return { value: world.replies?.shift() ?? warm } as never
   })
-  return { forks, state, requests, aborted, submitted, box }
+  return { forks, state, requests, aborted, submitted, box, shown }
 }
 
 const STEP = { turnId: 't', index: 1, model: 'm', messageCount: 3 }
 
 async function step($: any) {
   for await (const _ of $.turn.step(STEP)) void _
+}
+
+function keepalive($: any, args: string) {
+  return $.command.run({ command: 'keepalive', args })
+}
+
+function say($: any, text: string) {
+  return $.prompt.submit({ text })
 }
 
 async function turn($: any) {
@@ -140,7 +154,7 @@ test('a read that finds the cache gone ends the plan', async ($, on) => {
   expect(forks.length).toBe(1)
   await clock.advance(120 * MINUTE)
   expect(forks.length).toBe(1)
-  const { text } = (await $.command.run({ command: 'keepalive', args: '' })) as { text: string }
+  const { text } = (await keepalive($, '')) as { text: string }
   expect(text).toContain('the cache was gone')
 })
 
@@ -157,10 +171,10 @@ test('/keepalive off stops reads and on starts them again', async ($, on) => {
   const clock = mock.clock(on)
   const { forks } = engine(on)
   await turn($)
-  await $.command.run({ command: 'keepalive', args: 'off' })
+  await keepalive($, 'off')
   await clock.advance(120 * MINUTE)
   expect(forks.length).toBe(0)
-  await $.command.run({ command: 'keepalive', args: 'on' })
+  await keepalive($, 'on')
   await clock.advance(50 * MINUTE)
   expect(forks.length).toBe(1)
 })
@@ -169,7 +183,7 @@ test('/keepalive now reports what it read', async ($, on) => {
   mock.clock(on)
   engine(on)
   await turn($)
-  const { text } = (await $.command.run({ command: 'keepalive', args: 'now' })) as { text: string }
+  const { text } = (await keepalive($, 'now')) as { text: string }
   expect(text).toBe('Read 150K of 150K prompt tokens from the cache (0 written).')
 })
 
@@ -181,7 +195,7 @@ test('a used-up weekly limit stops the reads without a request', async ($, on) =
   world.rateLimits = [window('five_hour', 10), window('seven_day', 100, 48 * HOUR)]
   await clock.advance(120 * MINUTE)
   expect(forks.length).toBe(0)
-  const { text } = (await $.command.run({ command: 'keepalive', args: '' })) as { text: string }
+  const { text } = (await keepalive($, '')) as { text: string }
   expect(text).toContain('seven_day limit is used up')
 })
 
@@ -190,7 +204,7 @@ test('a window that already started over does not stop the reads', async ($, on)
   engine(on, { rateLimits: [window('five_hour', 100, 10 * MINUTE)] }).forks
   await turn($)
   await clock.advance(50 * MINUTE)
-  const { text } = (await $.command.run({ command: 'keepalive', args: '' })) as { text: string }
+  const { text } = (await keepalive($, '')) as { text: string }
   expect(text).toContain('1 read(s)')
 })
 
@@ -239,8 +253,8 @@ test('a message typed during a pause is held and goes out after the reset', asyn
   const clock = mock.clock(on)
   const { submitted } = engine(on, { rateLimits: [window('five_hour', 96, 2 * HOUR)] })
   await turn($).catch(() => undefined)
-  const held = await $.prompt.submit({ text: 'first' })
-  await $.prompt.submit({ text: 'second' })
+  const held = await say($, 'first')
+  await say($, 'second')
   expect((held as { drop?: string }).drop).toContain('held')
   expect(submitted.length).toBe(0)
   await clock.advance(121 * MINUTE)
@@ -250,8 +264,8 @@ test('a message typed during a pause is held and goes out after the reset', asyn
 test('/keepalive resume releases what is held and stops pausing in this window', async ($, on) => {
   const clock = mock.clock(on)
   const { submitted, requests } = engine(on, { rateLimits: [window('five_hour', 96, 2 * HOUR)] })
-  await $.prompt.submit({ text: 'first' })
-  await $.command.run({ command: 'keepalive', args: 'resume' })
+  await say($, 'first')
+  await keepalive($, 'resume')
   await clock.advance(1000)
   expect(submitted).toEqual(['first'])
   await $.turn.start({ turnId: 't', text: 'hi' })
@@ -273,13 +287,89 @@ test('a held message leaves the box, but a new draft stays', async ($, on) => {
   const clock = mock.clock(on)
   const { box } = engine(on, { rateLimits: [window('five_hour', 96, 2 * HOUR)] })
   box.text = 'first'
-  await $.prompt.submit({ text: 'first' })
+  await say($, 'first')
   await clock.advance(1000)
   expect(box.text).toBe('')
   box.text = 'something new'
   box.cleared = 0
-  await $.prompt.submit({ text: 'second' })
+  await say($, 'second')
   await clock.advance(1000)
   expect(box.text).toBe('something new')
   expect(box.cleared).toBe(0)
+})
+
+const HINT = {
+  plugin: 'cache-keepalive',
+  surface: 'terminal',
+  component: 'PromptHint',
+  props: { isDraft: false, isWorking: false, hint: '? for shortcuts' },
+} as const
+
+async function tailShown($: any, shown: { tail?: string }) {
+  shown.tail = undefined
+  const ui = await $.ui.mount(HINT)
+  await ui.unmount()
+  return shown.tail
+}
+
+async function interactive($: any) {
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+}
+
+test('the status line counts down to the next read', async ($, on) => {
+  const clock = mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await turn($)
+  await clock.advance(10 * MINUTE)
+  expect(await tailShown($, shown)).toBe('keepalive next read in 40m')
+})
+
+test('the status line counts the reads', async ($, on) => {
+  const clock = mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await turn($)
+  await clock.advance(50 * MINUTE)
+  expect(await tailShown($, shown)).toBe('keepalive next read in 50m (1 read)')
+})
+
+test('the status line shows a pause and what it holds', async ($, on) => {
+  mock.clock(on)
+  const { shown } = engine(on, { rateLimits: [window('five_hour', 96, 2 * HOUR)] })
+  await interactive($)
+  await say($, 'first')
+  expect(await tailShown($, shown)).toBe('keepalive paused at 96%, resets in 2h, 1 held')
+})
+
+test('the status line says why a conversation is skipped', async ($, on) => {
+  mock.clock(on)
+  const { shown } = engine(on, { tokens: 5_000 })
+  await interactive($)
+  await turn($)
+  expect(await tailShown($, shown)).toBe('keepalive skipped: 5K is below 100K')
+})
+
+test('before any turn the status line says what it waits for', async ($, on) => {
+  mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  expect(await tailShown($, shown)).toBe('keepalive starts after the next turn')
+})
+
+test('the status line clears when it is turned off', async ($, on) => {
+  mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await turn($)
+  await keepalive($, 'off')
+  expect(await tailShown($, shown)).toBeUndefined()
+})
+
+test('showStatus false leaves the line alone', { options: { showStatus: false } }, async ($, on) => {
+  mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await turn($)
+  expect(await tailShown($, shown)).toBeUndefined()
 })

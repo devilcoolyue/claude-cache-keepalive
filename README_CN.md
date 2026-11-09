@@ -28,9 +28,24 @@ claude plugin install cache-keepalive --marketplace devilcoolyue/claude-cache-ke
 
 已在 Claude Code 2.1.319 上测试。
 
+## 状态显示
+
+安装后自动工作。输入框下方的提示行会显示当前状态，不需要任何配置，和 claude-hud 这类状态栏可以同时使用：
+
+| 显示内容 | 含义 |
+| --- | --- |
+| `keepalive next read in 42m (2 reads)` | 正在保活 |
+| `keepalive on` | 回合运行中，结束后安排下一次读取 |
+| `keepalive paused at 96%, resets in 50m, 1 held` | 5 小时额度暂停中，以及等待重置后发送的消息数 |
+| `keepalive starts after the next turn` | 还没有计划，回合结束时才会建立 |
+| `keepalive skipped: 60K is below 100K` | 不保活。另一种跳过原因是 `5-minute cache` |
+| `keepalive stopped` | 已停止，运行 `/keepalive` 查看原因 |
+
+倒计时每分钟刷新一次。目前只在终端里显示，`showStatus: false` 可以隐藏。
+
 ## 命令
 
-安装后自动工作。只有一个命令 `/keepalive`：
+只有一个命令 `/keepalive`：
 
 | 命令 | 作用 |
 | --- | --- |
@@ -79,6 +94,7 @@ claude plugin install cache-keepalive --marketplace devilcoolyue/claude-cache-ke
 | `pausePercent` | `95` | 触发暂停的 5 小时用量（50–99，0 表示不暂停） |
 | `maxHours` | `3` | 上一轮结束后最多保活多久（1–24 小时） |
 | `enabled` | `true` | 是否启用 |
+| `showStatus` | `true` | 在输入框下方的提示行显示状态 |
 | `hourCacheOnApiKey` | `false` | 只有 API Key 或中转确实配置成写 1 小时缓存时才打开 |
 
 在 Claude Code 里修改：
