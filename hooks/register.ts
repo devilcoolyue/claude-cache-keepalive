@@ -1,6 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, PluginOptions, Register, SessionRateLimit } from 'claude-code'
 
+import { MESSAGES } from './messages'
+import type { Locale, Messages } from './messages'
+
 const statusLine = atom({ plugin: 'cache-keepalive', key: 'statusLine' } as const, '')
 
 const MINUTE = 60_000
@@ -29,8 +32,11 @@ const PAUSE_LIMIT = 6 * HOUR
 const PROMPT =
   'Reply with just OK. You have no tools; answer straight away without thinking it over.'
 
-/** Sent once the window starts over, for a turn the pause stopped. */
-const RESUME_TEXT = 'Continue where you left off; a usage pause stopped the last turn.'
+/** Cells of the status line's countdown bar. */
+const BAR_CELLS = 8
+/** The frames shown only while a read is out, and how fast they turn. */
+const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+const SPIN_INTERVAL = 250
 
 type Settings = {
   enabled: boolean
@@ -41,6 +47,7 @@ type Settings = {
   /** The five-hour usage that pauses the session; 0 never pauses. */
   pausePercent: number
   showStatus: boolean
+  language: 'auto' | Locale
 }
 
 type Plan = {
@@ -65,6 +72,7 @@ type Pause = { percent: number; resetsAt: number }
 /** Dropped on a reload with the timers it holds; the next turn plans again. */
 type Runtime = {
   config: Settings
+  locale: Locale
   plan?: Plan
   cancelTimer?: () => void
   /** The running main-loop turn. */
@@ -75,6 +83,8 @@ type Runtime = {
   lastLabel: string
   /** What the status line was last told, to redraw only on a change. */
   lastStatus?: string
+  /** The spinner's frame while a read is out. */
+  spinFrame?: number
   /** Messages typed during a pause, sent once it ends. */
   held: string[]
   /** A turn the pause stopped, carried on once it ends. */
@@ -104,6 +114,7 @@ function settings(options: PluginOptions): Settings {
     hourCacheOnApiKey: options.hourCacheOnApiKey === true,
     pausePercent: pause <= 0 ? 0 : clamp(pause, 50, 99, 95),
     showStatus: options.showStatus !== false,
+    language: options.language === 'zh' || options.language === 'en' ? options.language : 'auto',
   }
 }
 
@@ -115,11 +126,48 @@ function minutesUntil(at: number, now: number) {
   return Math.max(Math.ceil((at - now) / MINUTE), 0)
 }
 
-function formatWait(at: number, now: number) {
-  const minutes = minutesUntil(at, now)
-  if (minutes < 60) return `${minutes}m`
-  const rest = minutes % 60
-  return rest ? `${Math.floor(minutes / 60)}h ${rest}m` : `${minutes / 60}h`
+function t(s: Runtime): Messages {
+  return MESSAGES[s.locale]
+}
+
+/** A language picked in the settings, else Claude Code's, else the system's. */
+async function detectLocale($: Engine, s: Runtime): Promise<Locale> {
+  const { language } = s.config
+  if (language !== 'auto') return language
+  try {
+    const row = (await $.config.list()).find(item => item.key === 'language')
+    const chosen = String(row?.value ?? '')
+    if (/chin|中文|汉语|简体|繁体|^zh/i.test(chosen)) return 'zh'
+    if (chosen && !/default/i.test(chosen)) return 'en'
+    const system = (await $.env.get('LC_ALL')) || (await $.env.get('LC_MESSAGES')) || (await $.env.get('LANG')) || ''
+    return /^zh/i.test(system) ? 'zh' : 'en'
+  } catch {
+    return 'en'
+  }
+}
+
+/** Full at the start of the wait, emptying as the next read comes closer. */
+function countdownBar(next: number, now: number, interval: number) {
+  const cells = Math.min(Math.max(Math.ceil(((next - now) / interval) * BAR_CELLS), 0), BAR_CELLS)
+  return '█'.repeat(cells) + '░'.repeat(BAR_CELLS - cells)
+}
+
+/** Turns the spinner while `work` runs; the only thing that animates. */
+async function withSpinner<T>($: Engine, s: Runtime, work: () => Promise<T>): Promise<T> {
+  if (!s.config.showStatus) return work()
+  s.spinFrame = 0
+  const timer = $.clock.every(SPIN_INTERVAL, () => {
+    s.spinFrame = (s.spinFrame ?? 0) + 1
+    void refreshStatus($, s)
+  })
+  await refreshStatus($, s)
+  try {
+    return await work()
+  } finally {
+    timer.cancel()
+    s.spinFrame = undefined
+    await refreshStatus($, s)
+  }
 }
 
 /** The window's reset, or undefined when it reported none it can be held to. */
@@ -153,7 +201,7 @@ function disarm(s: Runtime) {
   s.cancelTimer = undefined
 }
 
-function end(s: Runtime, why: string, label = 'stopped') {
+function end(s: Runtime, why: string, label = t(s).stopped) {
   disarm(s)
   s.plan = undefined
   s.lastEnd = why
@@ -163,24 +211,23 @@ function end(s: Runtime, why: string, label = 'stopped') {
 /** The few words shown under the prompt; empty when there is nothing to show. */
 function statusText(s: Runtime, now: number, pause: Pause | undefined) {
   if (s.isOff) return ''
-  if (pause) {
-    const held = s.held.length ? `, ${s.held.length} held` : ''
-    return `keepalive paused at ${pause.percent}%, resets in ${formatWait(pause.resetsAt, now)}${held}`
-  }
-  if (s.turnId !== undefined) return 'keepalive on'
+  const m = t(s)
+  if (s.spinFrame !== undefined) return m.reading(SPINNER[s.spinFrame % SPINNER.length] ?? '')
+  if (pause) return m.paused(pause.percent, m.duration(minutesUntil(pause.resetsAt, now)), s.held.length)
+  if (s.turnId !== undefined) return m.running
   if (s.plan) {
-    const { reads } = s.plan
-    const count = reads ? ` (${reads} read${reads > 1 ? 's' : ''})` : ''
-    return `keepalive next read in ${formatWait(s.plan.next, now)}${count}`
+    const { next, reads } = s.plan
+    return m.next(countdownBar(next, now, s.config.interval), m.duration(minutesUntil(next, now)), reads)
   }
-  return `keepalive ${s.lastLabel || 'starts after the next turn'}`
+  return s.lastLabel || m.waiting
 }
 
 /** Tells the status line the current state. Never fails the hook that asks. */
 async function refreshStatus($: Engine, s: Runtime) {
   try {
     if (!s.config.showStatus) return
-    const text = statusText(s, await $.clock.now(), await currentPause($, s))
+    const pause = s.spinFrame === undefined ? await currentPause($, s) : undefined
+    const text = statusText(s, await $.clock.now(), pause)
     if (text === s.lastStatus) return
     s.lastStatus = text
     await update($, statusLine, () => text)
@@ -193,7 +240,7 @@ function arm($: Engine, s: Runtime, plan: Plan, now: number) {
   disarm(s)
   const timer = $.clock.after(Math.max(plan.next - now, 1000), () => {
     fire($, s)
-      .catch(err => end(s, `failed: ${String(err)}`))
+      .catch(err => end(s, t(s).failed(String(err))))
       .finally(() => refreshStatus($, s))
   })
   s.cancelTimer = () => timer.cancel()
@@ -210,7 +257,7 @@ function armResume($: Engine, s: Runtime, delay: number) {
     s.cancelResume = undefined
     resume($, s)
       .catch(err => {
-        s.lastEnd = `could not resume: ${String(err)}`
+        s.lastEnd = t(s).couldNotResume(String(err))
       })
       .finally(() => refreshStatus($, s))
   })
@@ -234,7 +281,7 @@ async function resume($: Engine, s: Runtime) {
   s.isTurnStopped = false
   // Messages the person queued already carry on; no second turn for that.
   if (held.length > 0) await $.prompt.submit({ text: held.join('\n\n') })
-  else if (wasStopped) await $.prompt.submit({ text: RESUME_TEXT })
+  else if (wasStopped) await $.prompt.submit({ text: t(s).resumeText })
 }
 
 /** Empties the box of a held message, so Enter does not send it twice. */
@@ -263,13 +310,13 @@ async function replan($: Engine, s: Runtime) {
   const { config } = s
   const now = await $.clock.now()
   if (!(await hasHourCache($, s))) {
-    end(s, 'not kept: this account writes five-minute caches', 'skipped: 5-minute cache')
+    end(s, t(s).notKeptFiveMinute, t(s).skippedFiveMinute)
     return
   }
   const tokens = (await $.session.usage()).context.tokens ?? 0
   if (tokens < config.minTokens) {
-    end(s, `not kept: the prompt has ${formatTokens(tokens)} tokens, below ${formatTokens(config.minTokens)}`,
-      `skipped: ${formatTokens(tokens)} is below ${formatTokens(config.minTokens)}`)
+    const [size, min] = [formatTokens(tokens), formatTokens(config.minTokens)]
+    end(s, t(s).notKeptSmall(size, min), t(s).skippedSmall(size, min))
     return
   }
   const model = await $.session.model()
@@ -289,24 +336,25 @@ async function replan($: Engine, s: Runtime) {
 }
 
 /** Sends one read of the conversation's cache and says what it found. */
-async function readCache($: Engine): Promise<ReadOutcome> {
+async function readCache($: Engine, s: Runtime): Promise<ReadOutcome> {
+  const m = t(s)
   // A read here would be refused, or billed as extra usage.
   const usedUp = usedUpWindow((await $.session.usage()).rateLimits, await $.clock.now())
-  if (usedUp) return { kind: 'failed', why: `the ${usedUp} limit is used up` }
-  const reply = await $.model.fork({ prompt: PROMPT })
+  if (usedUp) return { kind: 'failed', why: m.limitUsedUp(usedUp) }
+  const reply = await withSpinner($, s, () => $.model.fork({ prompt: PROMPT }))
   if (!reply.isAnswered && reply.reason === 'nothing-to-fork') {
-    return { kind: 'failed', why: 'the conversation has nothing to keep (new, or just cleared)' }
+    return { kind: 'failed', why: m.nothingToKeep }
   }
-  const why = reply.isAnswered ? 'no usage reported' : reply.reason
+  const why = reply.isAnswered ? m.noUsageReported : reply.reason
   const usage = reply.usage
-  if (!usage) return { kind: 'failed', why: `no response (${why})` }
+  if (!usage) return { kind: 'failed', why: m.noResponse(why) }
   const read = usage.cache_read_input_tokens
   const prompt = usage.input_tokens + read + usage.cache_creation_input_tokens
-  if (prompt === 0) return { kind: 'failed', why: `no response (${why})` }
-  const detail = `${formatTokens(usage.cache_creation_input_tokens)} written`
+  if (prompt === 0) return { kind: 'failed', why: m.noResponse(why) }
+  const detail = formatTokens(usage.cache_creation_input_tokens)
   if (read * 2 < prompt) return { kind: 'cold', read, prompt, detail }
   if (!reply.isAnswered && reply.reason !== 'empty-reply') {
-    return { kind: 'failed', why: `request failed (${reply.reason})` }
+    return { kind: 'failed', why: m.requestFailed(reply.reason) }
   }
   return { kind: 'warm', read, prompt, detail }
 }
@@ -319,7 +367,7 @@ async function advance($: Engine, s: Runtime, plan: Plan, now: number) {
   plan.until = Math.max(plan.until, untilFor(s, plan.at, await currentPause($, s)))
   if (s.plan !== plan) return
   if (plan.next >= plan.until) {
-    end(s, `stopped: the longest keepalive after the last turn has passed`)
+    end(s, t(s).longestPassed)
     return
   }
   arm($, s, plan, now)
@@ -336,53 +384,55 @@ async function fire($: Engine, s: Runtime) {
     return
   }
   if (now - plan.lastUse >= CACHE_LIFETIME - LATE_MARGIN) {
-    end(s, 'stopped: the cache had already expired (was the computer asleep?)')
+    end(s, t(s).expired)
     return
   }
   if ((await $.session.model()) !== plan.model) {
-    end(s, 'stopped: the model changed')
+    end(s, t(s).modelChanged)
     return
   }
-  const outcome = await readCache($)
+  const outcome = await readCache($, s)
   // A turn that ended meanwhile has made a newer plan.
   if (s.plan !== plan) return
   if (outcome.kind === 'failed') {
-    end(s, `stopped: ${outcome.why}`)
+    end(s, t(s).stoppedBecause(outcome.why))
   } else if (outcome.kind === 'cold') {
-    end(s, `stopped: the cache was gone (read ${formatTokens(outcome.read)} of ${formatTokens(outcome.prompt)})`)
+    end(s, t(s).cacheGone(formatTokens(outcome.read), formatTokens(outcome.prompt)))
   } else {
     await advance($, s, plan, await $.clock.now())
   }
 }
 
-function pauseLine(pause: Pause, now: number) {
-  return `Five-hour usage is at ${pause.percent}%, reserved for the cache keepalive until the window resets in ${minutesUntil(pause.resetsAt, now)} min.`
+function pauseLine(s: Runtime, pause: Pause, now: number) {
+  return t(s).pauseLine(pause.percent, minutesUntil(pause.resetsAt, now))
 }
 
 async function describe($: Engine, s: Runtime) {
-  if (s.isOff) return 'Cache keepalive is off for this session.'
+  const m = t(s)
+  if (s.isOff) return m.isOff
   const now = await $.clock.now()
   const pause = await currentPause($, s)
   const lines: string[] = []
   const plan = s.plan
   if (plan) {
-    lines.push(`Cache keepalive: ${formatTokens(plan.tokens)} tokens, next read in ${minutesUntil(plan.next, now)} min, ${plan.reads} read(s) so far, kept for ${minutesUntil(plan.until, now)} more min.`)
+    lines.push(m.plan(formatTokens(plan.tokens), minutesUntil(plan.next, now), plan.reads, minutesUntil(plan.until, now)))
   } else {
-    lines.push(`Cache keepalive is on, nothing planned.${s.lastEnd ? ` Last: ${s.lastEnd}.` : ' It starts when the next turn ends.'}`)
+    lines.push(s.lastEnd ? m.nothingPlannedLast(s.lastEnd) : m.nothingPlanned)
   }
   if (pause) {
-    const held = s.held.length ? ` ${s.held.length} message(s) held.` : ''
-    lines.push(`${pauseLine(pause, now)}${held} /keepalive resume carries on now.`)
+    const held = s.held.length ? m.heldCount(s.held.length) : ''
+    lines.push(`${pauseLine(s, pause, now)}${held}${m.resumeHint}`)
   }
   return lines.join('\n')
 }
 
 async function readNow($: Engine, s: Runtime) {
+  const m = t(s)
   const plan = s.plan
-  const outcome = await readCache($)
-  if (outcome.kind === 'failed') return `Keepalive read did not run: ${outcome.why}.`
-  const line = `Read ${formatTokens(outcome.read)} of ${formatTokens(outcome.prompt)} prompt tokens from the cache (${outcome.detail}).`
-  if (outcome.kind === 'cold') return `${line} The cache was gone, so this read paid to write it.`
+  const outcome = await readCache($, s)
+  if (outcome.kind === 'failed') return m.readDidNotRun(outcome.why)
+  const line = m.readLine(formatTokens(outcome.read), formatTokens(outcome.prompt), outcome.detail)
+  if (outcome.kind === 'cold') return `${line}${m.coldNote}`
   if (plan && s.plan === plan) await advance($, s, plan, await $.clock.now())
   return line
 }
@@ -390,11 +440,11 @@ async function readNow($: Engine, s: Runtime) {
 /** Carries on now, in spite of the five-hour window. */
 async function overridePause($: Engine, s: Runtime) {
   const pause = await currentPause($, s)
-  if (!pause) return 'No five-hour pause is in force.'
+  if (!pause) return t(s).noPause
   s.ignoredReset = pause.resetsAt
   // Off the timer: a command's hook may not submit a prompt itself.
   armResume($, s, RESUME_NOW)
-  return 'Carrying on in this five-hour window; no more pauses until it resets.'
+  return t(s).carryingOn
 }
 
 async function runCommand($: Engine, s: Runtime, args: string) {
@@ -404,9 +454,9 @@ async function runCommand($: Engine, s: Runtime, args: string) {
       return describe($, s)
     case 'off':
       s.isOff = true
-      end(s, 'turned off')
+      end(s, t(s).turnedOff)
       armResume($, s, RESUME_NOW)
-      return 'Cache keepalive is off for this session.'
+      return t(s).isOff
     case 'on':
       s.isOff = false
       s.lastEnd = ''
@@ -418,19 +468,25 @@ async function runCommand($: Engine, s: Runtime, args: string) {
     case 'resume':
       return overridePause($, s)
     default:
-      return 'Usage: /keepalive [status|on|off|now|resume]'
+      return t(s).usage
   }
 }
 
 export const register: Register = (on, options) => {
   const config = settings(options)
-  const s: Runtime = { config, isOff: !config.enabled, lastEnd: '', lastLabel: '', held: [], isTurnStopped: false }
+  const s: Runtime = {
+    config,
+    locale: config.language === 'auto' ? 'en' : config.language,
+    isOff: !config.enabled,
+    lastEnd: '',
+    lastLabel: '',
+    held: [],
+    isTurnStopped: false,
+  }
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'keepalive',
-      description: 'Shows or changes the prompt cache keepalive: status, on, off, now, resume',
-    })
+    s.locale = await detectLocale($, s)
+    await $.command.register({ name: 'keepalive', description: t(s).commandDescription })
     if (e.isInteractive && config.showStatus) {
       // The minutes it counts down, and usage that moved without a turn.
       $.clock.every(MINUTE, () => {
@@ -478,7 +534,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return result
     s.turnId = undefined
     if (e.reason === 'error') {
-      end(s, 'stopped: the last turn failed')
+      end(s, t(s).turnFailed)
     } else if (e.usage || s.isTurnStopped) {
       await replan($, s)
     }
@@ -494,7 +550,7 @@ export const register: Register = (on, options) => {
     if (!pause) return next(e)
     const now = await $.clock.now()
     if (e.attachments?.length) {
-      return { drop: `${pauseLine(pause, now)} Send this message with its attachments again then, or run /keepalive resume first.` }
+      return { drop: `${pauseLine(s, pause, now)}${t(s).attachmentsRefused}` }
     }
     s.held.push(e.text)
     resumeAfterReset($, s, pause, now)
@@ -503,14 +559,14 @@ export const register: Register = (on, options) => {
       clearHeldDraft($, text).catch(() => undefined)
     })
     await refreshStatus($, s)
-    return { drop: `${pauseLine(pause, now)} Your message is held and goes out by itself then; /keepalive resume sends it now.` }
+    return { drop: `${pauseLine(s, pause, now)}${t(s).messageHeld}` }
   })
 
   // A compaction replaces what the cache held; the next turn writes it anew.
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
     if (e.agentId === undefined) {
-      end(s, 'stopped: the conversation was compacted')
+      end(s, t(s).compacted)
       await refreshStatus($, s)
     }
     return result

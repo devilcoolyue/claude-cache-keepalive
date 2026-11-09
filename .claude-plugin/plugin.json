@@ -1,6 +1,6 @@
 {
   "name": "cache-keepalive",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Keeps an idle Claude Code session's one-hour prompt cache warm, so coming back reads the conversation instead of paying to write it again.",
   "author": {
     "name": "devilcoolyue"
@@ -49,6 +49,17 @@
       "title": "Show status under the prompt",
       "description": "Show the keepalive's state at the end of the hint line under the prompt.",
       "default": true
+    },
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "The language of its messages. auto follows Claude Code's language setting, then the system locale.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "zh",
+        "en"
+      ]
     }
   }
 }

@@ -34,14 +34,15 @@ claude plugin install cache-keepalive --marketplace devilcoolyue/claude-cache-ke
 
 | 显示内容 | 含义 |
 | --- | --- |
-| `keepalive next read in 42m (2 reads)` | 正在保活 |
-| `keepalive on` | 回合运行中，结束后安排下一次读取 |
-| `keepalive paused at 96%, resets in 50m, 1 held` | 5 小时额度暂停中，以及等待重置后发送的消息数 |
-| `keepalive starts after the next turn` | 还没有计划，回合结束时才会建立 |
-| `keepalive skipped: 60K is below 100K` | 不保活。另一种跳过原因是 `5-minute cache` |
-| `keepalive stopped` | 已停止，运行 `/keepalive` 查看原因 |
+| `● 保活 ██████░░ 42分钟（已读 2 次）` | 正在保活，进度条随下次读取临近而变短 |
+| `⠹ 保活读取中` | 正在读取缓存，只有这时才有动画 |
+| `◌ 保活已开启 · 等待本轮结束` | 回合运行中，缓存由回合自身刷新，结束后安排下一次读取 |
+| `⏸ 保活暂停 96% · 50分钟后重置 · 暂存 1 条` | 5 小时额度暂停中，以及等待重置后发送的消息数 |
+| `○ 保活将在下一轮结束后开始` | 还没有计划，回合结束时才会建立 |
+| `○ 保活跳过：60K 低于 100K` | 不保活。另一种跳过原因是 `5 分钟缓存` |
+| `✕ 保活已停止` | 已停止，运行 `/keepalive` 查看原因 |
 
-倒计时每分钟刷新一次。目前只在终端里显示，`showStatus: false` 可以隐藏。
+倒计时每分钟刷新一次。目前只在终端里显示，`showStatus: false` 可以隐藏。文案语言跟随 Claude Code 的语言设置，其次是系统语言，也可以用 `language` 直接指定。
 
 ## 命令
 
@@ -95,6 +96,7 @@ claude plugin install cache-keepalive --marketplace devilcoolyue/claude-cache-ke
 | `maxHours` | `3` | 上一轮结束后最多保活多久（1–24 小时） |
 | `enabled` | `true` | 是否启用 |
 | `showStatus` | `true` | 在输入框下方的提示行显示状态 |
+| `language` | `auto` | 文案语言：`auto`、`zh` 或 `en` |
 | `hourCacheOnApiKey` | `false` | 只有 API Key 或中转确实配置成写 1 小时缓存时才打开 |
 
 在 Claude Code 里修改：

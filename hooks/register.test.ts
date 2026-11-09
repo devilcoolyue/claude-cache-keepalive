@@ -322,7 +322,7 @@ test('the status line counts down to the next read', async ($, on) => {
   await interactive($)
   await turn($)
   await clock.advance(10 * MINUTE)
-  expect(await tailShown($, shown)).toBe('keepalive next read in 40m')
+  expect(await tailShown($, shown)).toBe('● keepalive ███████░ 40m')
 })
 
 test('the status line counts the reads', async ($, on) => {
@@ -331,7 +331,7 @@ test('the status line counts the reads', async ($, on) => {
   await interactive($)
   await turn($)
   await clock.advance(50 * MINUTE)
-  expect(await tailShown($, shown)).toBe('keepalive next read in 50m (1 read)')
+  expect(await tailShown($, shown)).toBe('● keepalive ████████ 50m (1 read)')
 })
 
 test('the status line shows a pause and what it holds', async ($, on) => {
@@ -339,7 +339,7 @@ test('the status line shows a pause and what it holds', async ($, on) => {
   const { shown } = engine(on, { rateLimits: [window('five_hour', 96, 2 * HOUR)] })
   await interactive($)
   await say($, 'first')
-  expect(await tailShown($, shown)).toBe('keepalive paused at 96%, resets in 2h, 1 held')
+  expect(await tailShown($, shown)).toBe('⏸ keepalive paused at 96%, resets in 2h, 1 held')
 })
 
 test('the status line says why a conversation is skipped', async ($, on) => {
@@ -347,14 +347,22 @@ test('the status line says why a conversation is skipped', async ($, on) => {
   const { shown } = engine(on, { tokens: 5_000 })
   await interactive($)
   await turn($)
-  expect(await tailShown($, shown)).toBe('keepalive skipped: 5K is below 100K')
+  expect(await tailShown($, shown)).toBe('○ keepalive skipped: 5K is below 100K')
+})
+
+test('while a turn runs the status line says it waits for it', async ($, on) => {
+  mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await $.turn.start({ turnId: 't', text: 'hi' })
+  expect(await tailShown($, shown)).toBe('◌ keepalive on · waits for this turn')
 })
 
 test('before any turn the status line says what it waits for', async ($, on) => {
   mock.clock(on)
   const { shown } = engine(on)
   await interactive($)
-  expect(await tailShown($, shown)).toBe('keepalive starts after the next turn')
+  expect(await tailShown($, shown)).toBe('○ keepalive starts after the next turn')
 })
 
 test('the status line clears when it is turned off', async ($, on) => {
@@ -372,4 +380,53 @@ test('showStatus false leaves the line alone', { options: { showStatus: false } 
   await interactive($)
   await turn($)
   expect(await tailShown($, shown)).toBeUndefined()
+})
+
+test('the countdown bar empties as the next read comes closer', async ($, on) => {
+  const clock = mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await turn($)
+  await clock.advance(45 * MINUTE)
+  expect(await tailShown($, shown)).toBe('● keepalive █░░░░░░░ 5m')
+})
+
+test('the language setting puts everything in Chinese', { options: { language: 'zh' } }, async ($, on) => {
+  mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await turn($)
+  expect(await tailShown($, shown)).toBe('● 保活 ████████ 50分钟')
+  const { text } = (await keepalive($, '')) as { text: string }
+  expect(text).toBe('缓存保活：150K token，50 分钟后读取，已读取 0 次，还会保活 180 分钟。')
+})
+
+test('auto follows a Chinese system locale', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { LANG: 'zh_CN.UTF-8' })
+  on('config.list', () => ({ value: [{ key: 'language', value: 'Default (English)' }] }) as never)
+  const { shown } = engine(on)
+  await interactive($)
+  expect(await tailShown($, shown)).toBe('○ 保活将在下一轮结束后开始')
+})
+
+test('auto follows Claude Code\'s language over the system', async ($, on) => {
+  mock.clock(on)
+  mock.env(on, { LANG: 'en_US.UTF-8' })
+  on('config.list', () => ({ value: [{ key: 'language', value: '中文' }] }) as never)
+  const { shown } = engine(on)
+  await interactive($)
+  expect(await tailShown($, shown)).toBe('○ 保活将在下一轮结束后开始')
+})
+
+test('the Chinese pause message goes out with the five-hour reason', { options: { language: 'zh' } }, async ($, on) => {
+  const clock = mock.clock(on)
+  const { submitted, aborted } = engine(on, { rateLimits: [window('five_hour', 96, 2 * HOUR)] })
+  await interactive($)
+  await $.turn.start({ turnId: 't', text: 'hi' })
+  await step($)
+  expect(aborted).toEqual(['t'])
+  await $.turn.complete({ turnId: 't', answer: '', durationMs: 1, isAborted: true, reason: 'aborted' })
+  await clock.advance(121 * MINUTE)
+  expect(submitted[0]).toContain('继续')
 })

@@ -34,14 +34,15 @@ It works on its own once installed. The hint line under the prompt shows what it
 
 | Shown | Meaning |
 | --- | --- |
-| `keepalive next read in 42m (2 reads)` | Keeping the cache warm |
-| `keepalive on` | A turn is running; the next read is planned when it ends |
-| `keepalive paused at 96%, resets in 50m, 1 held` | A five-hour pause, and the messages waiting for the reset |
-| `keepalive starts after the next turn` | Nothing yet: a plan is made when a turn ends |
-| `keepalive skipped: 60K is below 100K` | Not kept. The other skip is `5-minute cache` |
-| `keepalive stopped` | It ended; `/keepalive` says why |
+| `● keepalive ██████░░ 42m (2 reads)` | Keeping the cache warm; the bar empties as the next read comes closer |
+| `⠹ keepalive reading` | A read is out; the only time it animates |
+| `◌ keepalive on · waits for this turn` | A turn is running and keeps the cache warm itself; the next read is planned when it ends |
+| `⏸ keepalive paused at 96%, resets in 50m, 1 held` | A five-hour pause, and the messages waiting for the reset |
+| `○ keepalive starts after the next turn` | Nothing yet: a plan is made when a turn ends |
+| `○ keepalive skipped: 60K is below 100K` | Not kept. The other skip is `5-minute cache` |
+| `✕ keepalive stopped` | It ended; `/keepalive` says why |
 
-The countdown refreshes once a minute. It shows in the terminal only, and `showStatus: false` hides it.
+The countdown refreshes once a minute. It shows in the terminal only, and `showStatus: false` hides it. Messages follow Claude Code's language setting, then the system locale; `language` picks one outright.
 
 ## Commands
 
@@ -95,6 +96,7 @@ The window is read from the responses this session receives, so usage elsewhere 
 | `maxHours` | `3` | How long after the last turn to keep the cache (1–24) |
 | `enabled` | `true` | Keep caches at all |
 | `showStatus` | `true` | Show the state in the hint line under the prompt |
+| `language` | `auto` | The language of its messages: `auto`, `zh` or `en` |
 | `hourCacheOnApiKey` | `false` | Turn on only if your API key or relay is set up to write one-hour caches |
 
 Change them inside Claude Code:
