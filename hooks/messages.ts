@@ -95,7 +95,7 @@ const en: Messages = {
   turnedOff: 'turned off',
 
   limitUsedUp: kind => `the ${kind} limit is used up`,
-  nothingToKeep: 'the conversation has nothing to keep (new, or just cleared)',
+  nothingToKeep: 'nothing to read yet (a new, cleared or just resumed session reads after its next turn)',
   noResponse: why => `no response (${why})`,
   requestFailed: why => `request failed (${why})`,
   noUsageReported: 'no usage reported',
@@ -150,7 +150,7 @@ const zh: Messages = {
   turnedOff: '已关闭',
 
   limitUsedUp: kind => `${WINDOW_NAMES_ZH[kind] ?? kind}已用尽`,
-  nothingToKeep: '对话没有可保活的内容（刚开始或刚清空）',
+  nothingToKeep: '暂时没有可读取的内容（新会话、刚清空或刚 resume 的会话，要等下一轮结束后才能读取）',
   noResponse: why => `没有响应（${why}）`,
   requestFailed: why => `请求失败（${why}）`,
   noUsageReported: '没有返回用量',

@@ -121,6 +121,7 @@ Each read is a real request billed to your account: the whole conversation at th
 
 - **It only runs while the session is open.** The plugin lives inside the Claude Code process, so closing the terminal ends it.
 - A read is a fork of the session: it uses the same model, system prompt and history, saves nothing to the transcript, and cannot use tools.
+- **After a restart or `--resume` it waits for your next turn.** Claude Code cannot read the cache until a turn has run in that process. The cache itself is unaffected, so send a message within its hour and keeping carries on.
 - The very first read after a session's first turn may find only part of the cache. The next real turn behaves the same way; from the second turn on, reads match in full.
 
 ## Development

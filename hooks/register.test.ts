@@ -167,16 +167,51 @@ test('a model switch ends the plan without a request', async ($, on) => {
   expect(forks.length).toBe(0)
 })
 
-test('/keepalive off stops reads and on starts them again', async ($, on) => {
+test('/keepalive off stops reads, and on goes by the last use of the cache', async ($, on) => {
+  const clock = mock.clock(on)
+  const { forks } = engine(on)
+  await turn($)
+  await keepalive($, 'off')
+  await clock.advance(30 * MINUTE)
+  expect(forks.length).toBe(0)
+  await keepalive($, 'on')
+  await clock.advance(19 * MINUTE)
+  expect(forks.length).toBe(0)
+  await clock.advance(MINUTE)
+  expect(forks.length).toBe(1)
+})
+
+test('/keepalive on does not read a cache that has already expired', async ($, on) => {
   const clock = mock.clock(on)
   const { forks } = engine(on)
   await turn($)
   await keepalive($, 'off')
   await clock.advance(120 * MINUTE)
+  const { text } = (await keepalive($, 'on')) as { text: string }
+  expect(text).toContain('already expired')
+  await clock.advance(120 * MINUTE)
   expect(forks.length).toBe(0)
-  await keepalive($, 'on')
-  await clock.advance(50 * MINUTE)
-  expect(forks.length).toBe(1)
+})
+
+test('/keepalive on before any turn waits for one', async ($, on) => {
+  const clock = mock.clock(on)
+  const { forks } = engine(on)
+  await keepalive($, 'off')
+  const { text } = (await keepalive($, 'on')) as { text: string }
+  expect(text).toContain('next turn')
+  await clock.advance(120 * MINUTE)
+  expect(forks.length).toBe(0)
+})
+
+test('a bar this far along moves with each minute', async ($, on) => {
+  const clock = mock.clock(on)
+  const { shown } = engine(on)
+  await interactive($)
+  await turn($)
+  await clock.advance(MINUTE)
+  expect(await tailShown($, shown)).toBe('● keepalive ███████▉ 49m')
+  await clock.advance(MINUTE)
+  expect(await tailShown($, shown)).toBe('● keepalive ███████▊ 48m')
 })
 
 test('/keepalive now reports what it read', async ($, on) => {
@@ -322,7 +357,7 @@ test('the status line counts down to the next read', async ($, on) => {
   await interactive($)
   await turn($)
   await clock.advance(10 * MINUTE)
-  expect(await tailShown($, shown)).toBe('● keepalive ███████░ 40m')
+  expect(await tailShown($, shown)).toBe('● keepalive ██████▌░ 40m')
 })
 
 test('the status line counts the reads', async ($, on) => {
@@ -388,7 +423,7 @@ test('the countdown bar empties as the next read comes closer', async ($, on) =>
   await interactive($)
   await turn($)
   await clock.advance(45 * MINUTE)
-  expect(await tailShown($, shown)).toBe('● keepalive █░░░░░░░ 5m')
+  expect(await tailShown($, shown)).toBe('● keepalive ▉░░░░░░░ 5m')
 })
 
 test('the language setting puts everything in Chinese', { options: { language: 'zh' } }, async ($, on) => {

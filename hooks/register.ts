@@ -34,6 +34,8 @@ const PROMPT =
 
 /** Cells of the status line's countdown bar. */
 const BAR_CELLS = 8
+/** A cell's eighths, so the bar moves with every minute of the countdown. */
+const PARTIAL_CELLS = ['', '▏', '▎', '▍', '▌', '▋', '▊', '▉']
 /** The frames shown only while a read is out, and how fast they turn. */
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const SPIN_INTERVAL = 250
@@ -77,6 +79,10 @@ type Runtime = {
   cancelTimer?: () => void
   /** The running main-loop turn. */
   turnId?: string
+  /** When the last turn of this process ended. */
+  lastTurnAt?: number
+  /** When the provider last used the cache, as far as this process knows. */
+  lastUseAt?: number
   isOff: boolean
   lastEnd: string
   /** Why nothing is planned, in the few words the status line has room for. */
@@ -148,8 +154,10 @@ async function detectLocale($: Engine, s: Runtime): Promise<Locale> {
 
 /** Full at the start of the wait, emptying as the next read comes closer. */
 function countdownBar(next: number, now: number, interval: number) {
-  const cells = Math.min(Math.max(Math.ceil(((next - now) / interval) * BAR_CELLS), 0), BAR_CELLS)
-  return '█'.repeat(cells) + '░'.repeat(BAR_CELLS - cells)
+  const eighths = Math.min(Math.max(Math.ceil(((next - now) / interval) * BAR_CELLS * 8), 0), BAR_CELLS * 8)
+  const full = Math.floor(eighths / 8)
+  const partial = PARTIAL_CELLS[eighths % 8] ?? ''
+  return '█'.repeat(full) + partial + '░'.repeat(BAR_CELLS - full - (partial ? 1 : 0))
 }
 
 /** Turns the spinner while `work` runs; the only thing that animates. */
@@ -303,12 +311,19 @@ async function hasHourCache($: Engine, s: Runtime) {
   return (await $.session.usage()).rateLimits.length > 0
 }
 
-async function replan($: Engine, s: Runtime) {
+/** Plans from a turn that just ended, or with `isRestore` from the last known use. */
+async function replan($: Engine, s: Runtime, isRestore = false) {
   disarm(s)
   s.plan = undefined
   if (s.isOff) return
   const { config } = s
   const now = await $.clock.now()
+  if (!isRestore) {
+    s.lastTurnAt = now
+    s.lastUseAt = now
+  }
+  const at = s.lastTurnAt ?? now
+  const lastUse = s.lastUseAt ?? now
   if (!(await hasHourCache($, s))) {
     end(s, t(s).notKeptFiveMinute, t(s).skippedFiveMinute)
     return
@@ -323,16 +338,25 @@ async function replan($: Engine, s: Runtime) {
   const pause = await currentPause($, s)
   // A turn may have started while the checks above were answered.
   if (s.turnId !== undefined) return
-  s.plan = {
-    at: now,
-    until: untilFor(s, now, pause),
-    lastUse: now,
-    next: now + config.interval,
+  if (now - lastUse >= CACHE_LIFETIME - LATE_MARGIN) {
+    end(s, t(s).expired)
+    return
+  }
+  const plan = {
+    at,
+    until: untilFor(s, at, pause),
+    lastUse,
+    next: Math.max(lastUse + config.interval, now + 1000),
     model,
     tokens,
     reads: 0,
   }
-  arm($, s, s.plan, now)
+  if (plan.next >= plan.until) {
+    end(s, t(s).longestPassed)
+    return
+  }
+  s.plan = plan
+  arm($, s, plan, now)
 }
 
 /** Sends one read of the conversation's cache and says what it found. */
@@ -362,6 +386,7 @@ async function readCache($: Engine, s: Runtime): Promise<ReadOutcome> {
 /** Records a warm read on the plan and arms the next one, if there is one. */
 async function advance($: Engine, s: Runtime, plan: Plan, now: number) {
   plan.lastUse = now
+  s.lastUseAt = now
   plan.reads += 1
   plan.next = now + s.config.interval
   plan.until = Math.max(plan.until, untilFor(s, plan.at, await currentPause($, s)))
@@ -461,7 +486,7 @@ async function runCommand($: Engine, s: Runtime, args: string) {
       s.isOff = false
       s.lastEnd = ''
       s.lastLabel = ''
-      if (s.turnId === undefined && (await $.session.turns()) > 0) await replan($, s)
+      if (s.turnId === undefined && s.lastUseAt !== undefined) await replan($, s, true)
       return describe($, s)
     case 'now':
       return readNow($, s)
